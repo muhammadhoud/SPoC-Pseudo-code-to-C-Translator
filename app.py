@@ -23,6 +23,17 @@ MODEL_RELEASE_TAG = "v1.0.0"                       # Your release tag
 MODEL_ZIP_NAME = "final_spoc_model.zip"            # Name of your zip file
 MODEL_DIR = "final_spoc_model"                     # Directory name after extraction
 
+
+
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from peft import PeftModel, PeftConfig
+    DEPENDENCIES_LOADED = True
+except ImportError as e:
+    st.error(f"❌ Missing dependency: {e}")
+    st.info("Please make sure all requirements are installed. Check the requirements.txt file.")
+    DEPENDENCIES_LOADED = False
 # ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
@@ -258,21 +269,42 @@ def extract_model():
         st.error(f"Extraction failed: {e}")
         return False
 
+def clear_model_cache():
+    """Clear the local model cache and force redownload"""
+    import shutil
+    try:
+        if os.path.exists(MODEL_DIR):
+            shutil.rmtree(MODEL_DIR)
+        if os.path.exists(MODEL_ZIP_NAME):
+            os.remove(MODEL_ZIP_NAME)
+        return True
+    except Exception as e:
+        st.error(f"Error clearing cache: {e}")
+        return False
+
 def download_model_from_github():
     """
-    Main function to download model from GitHub Release
-    Handles both single file and chunked downloads
-    
-    Returns:
-        bool: True if model is ready, False otherwise
+    Enhanced download function with better error handling
     """
     
-    # Check if model already exists locally
-    if os.path.exists(MODEL_DIR) and os.path.exists(os.path.join(MODEL_DIR, "adapter_config.json")):
-        st.success("✅ Model already exists locally!")
-        return True
+    # Check if model exists and is valid
+    model_exists = os.path.exists(MODEL_DIR) and os.path.exists(os.path.join(MODEL_DIR, "adapter_config.json"))
     
-    st.warning("🔄 Model not found locally. Downloading from GitHub Release...")
+    if model_exists:
+        try:
+            # Quick validation check
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+            st.success("✅ Model exists and appears valid!")
+            return True
+        except Exception as e:
+            st.warning(f"⚠️ Model may be corrupted: {e}")
+            if st.button("🔄 Clear Cache & Redownload", key="fix_model"):
+                clear_model_cache()
+                st.rerun()
+            return False
+    
+    # Download logic here (your existing download code)
+    st.warning("🔄 Downloading model from GitHub Release...")
     st.info(f"📍 Repository: {GITHUB_REPO}\n📌 Release: {MODEL_RELEASE_TAG}")
     
     # Create expander for download progress
@@ -320,46 +352,69 @@ def download_model_from_github():
 @st.cache_resource(show_spinner=False)
 def load_model():
     """
-    Load model from local directory
-    Uses caching to avoid reloading on every interaction
-    
-    Returns:
-        tuple: (model, tokenizer, error_message)
+    Load model with enhanced error handling and vocabulary management
     """
     
     try:
-        # Verify model directory exists
-        if not os.path.exists(MODEL_DIR):
-            return None, None, f"Model directory not found: {MODEL_DIR}"
-        
-        # Load PEFT configuration
+        # Step 1: Load configuration to understand the model structure
         config_path = os.path.join(MODEL_DIR, "adapter_config.json")
         if not os.path.exists(config_path):
-            return None, None, "adapter_config.json not found in model directory"
+            return None, None, "adapter_config.json not found"
         
-        config = PeftConfig.from_pretrained(MODEL_DIR)
+        with open(config_path, 'r') as f:
+            adapter_config = json.load(f)
         
-        # Load base model
-        base_model = AutoModelForCausalLM.from_pretrained(
-            config.base_model_name_or_path,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            low_cpu_mem_usage=True,
-            device_map="auto" if torch.cuda.is_available() else None
+        base_model_name = adapter_config.get("base_model_name_or_path", "distilgpt2")
+        
+        st.info(f"🔄 Loading base model: {base_model_name}")
+        
+        # Step 2: Load tokenizer from local directory (preserves special tokens)
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_DIR,
+            padding_side="left",
+            truncation_side="left"
         )
         
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+        # Ensure special tokens are present
+        special_tokens = ["<|PSEUDO|>", "<|CODE|>"]
+        current_vocab = tokenizer.get_vocab()
+        tokens_to_add = [token for token in special_tokens if token not in current_vocab]
+        
+        if tokens_to_add:
+            tokenizer.add_tokens(tokens_to_add)
+            st.info(f"✅ Added special tokens: {tokens_to_add}")
+        
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        # Load PEFT adapter
+        # Step 3: Load base model
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True
+        )
+        
+        # Resize embeddings to match tokenizer (CRITICAL FIX)
+        base_model.resize_token_embeddings(len(tokenizer))
+        st.info(f"✅ Resized embeddings to match tokenizer: {len(tokenizer)} tokens")
+        
+        # Step 4: Load PEFT adapter
         model = PeftModel.from_pretrained(base_model, MODEL_DIR)
         model.eval()
         
+        st.success("✅ Model loaded successfully!")
         return model, tokenizer, None
         
     except Exception as e:
-        return None, None, str(e)
+        error_msg = str(e)
+        if "size mismatch" in error_msg:
+            return None, None, f"Vocabulary size mismatch. Please clear cache and redownload. Error: {error_msg}"
+        elif "Unable to load" in error_msg:
+            return None, None, f"Model file corrupted. Please clear cache and redownload. Error: {error_msg}"
+        else:
+            return None, None, f"Model loading failed: {error_msg}"
+
 
 # ============================================================================
 # CODE GENERATION
@@ -442,6 +497,18 @@ def main():
         '<div class="sub-header">Convert pseudo-code into C++ code using AI</div>',
         unsafe_allow_html=True
     )
+    
+    # Add cache clearing button at the top
+    if st.button("🔄 Clear Model Cache & Reload", type="secondary"):
+        if clear_model_cache():
+            st.success("✅ Cache cleared! Reloading...")
+            st.rerun()
+    
+    # Check dependencies
+    if not DEPENDENCIES_LOADED:
+        st.error("❌ Required dependencies are missing!")
+        st.info("Please check that your requirements.txt includes: torch, transformers, peft, accelerate")
+        return
     
     # Step 1: Download model if needed
     st.info("🔍 Checking for model files...")
