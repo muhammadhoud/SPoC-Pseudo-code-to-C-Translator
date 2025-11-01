@@ -1,0 +1,20 @@
+# Model files
+final_spoc_model/
+*.zip
+*.part*
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+.streamlit/secrets.toml
