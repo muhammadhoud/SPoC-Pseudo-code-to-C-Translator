@@ -243,7 +243,7 @@ pseudo-code-to-cpp/
 ## Contact & Author Details
 
 **Muhammad Houd**
-*   **Email:** 6240houd@gmail.com
+*   **Email:** mhoud131@gmail.com
 *   **LinkedIn:** [Muhammad Houd](https://www.linkedin.com/in/muhammadhoud/)
 *   **GitHub:** [@muhammadhoud](https://github.com/muhammadhoud)
 
